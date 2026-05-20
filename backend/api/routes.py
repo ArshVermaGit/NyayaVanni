@@ -98,7 +98,7 @@ async def upload_document(request: Request, file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @api_router.post("/analyze/{document_id}")
-async def analyze_document(request: Request, document_id: str, language: str = "en", file: UploadFile = File(None)):
+async def analyze_document(request: Request, document_id: str, language: str = "en", force_ocr: bool = False, file: UploadFile = File(None)):
     """
     Trigger full analysis pipeline.
     For this MVP, we optionally accept the file again if we don't download from S3 to save time.
@@ -108,15 +108,16 @@ async def analyze_document(request: Request, document_id: str, language: str = "
         session_id = require_session_id(request)
         record = require_document_owner(document_id, session_id)
         # ── Cache-first ──────────────────────────────────────────────────────────
-        cached = get_cached_analysis(document_id, language)
-        if cached:
-            logger.info(f"Cache HIT for document {document_id} [{language}]")
-            return {
-                "documentId": document_id,
-                "analysis": cached["analysis"],
-                "extracted_text": cached["extracted_text"][:500] + "...",
-                "cached": True
-            }
+        if not force_ocr:
+            cached = get_cached_analysis(document_id, language)
+            if cached:
+                logger.info(f"Cache HIT for document {document_id} [{language}]")
+                return {
+                    "documentId": document_id,
+                    "analysis": cached["analysis"],
+                    "extracted_text": cached["extracted_text"][:500] + "...",
+                    "cached": True
+                }
         # ── Cache MISS: run the full pipeline ────────────────────────────────────
         # Simplify MVP: if file is not provided, we download it from local storage via SQLite metadata.
         if not file:
@@ -135,7 +136,7 @@ async def analyze_document(request: Request, document_id: str, language: str = "
             filename = file.filename
         
         # 1. OCR Extraction
-        text = extract_document(contents, filename)
+        text = extract_document(contents, filename, force_ocr=force_ocr)
         
         # 2. RAG Retrieval
         relevant_laws = retrieve_relevant_laws(text, k=3)
