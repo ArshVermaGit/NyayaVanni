@@ -1,9 +1,13 @@
 import os
 from services.knowledge_graph_service import LegalKnowledgeGraphBuilder
-from fastapi import APIRouter, File, UploadFile, HTTPException, Depends
+from fastapi import APIRouter, File, UploadFile, HTTPException, Depends, Request
 from services.storage_service import (
-    upload_to_local, save_document_record, get_document_record,
-    save_cached_analysis, get_cached_analysis
+    upload_to_local,
+    save_document_record,
+    get_document_record,
+    save_cached_analysis,
+    get_cached_analysis,
+    create_session_id
 )
 from services.ocr_service import extract_document
 from services.rag_service import retrieve_relevant_laws
@@ -16,6 +20,10 @@ logger = logging.getLogger(__name__)
 
 api_router = APIRouter()
 graph_builder = LegalKnowledgeGraphBuilder()
+@api_router.get("/session")
+async def create_session():
+    return {"sessionId": create_session_id()}
+    
 @api_router.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
     """Upload document to S3 and return documentId"""
