@@ -1,56 +1,30 @@
 import os
+import uuid
+import json
+import logging
+
+from fastapi import APIRouter, File, UploadFile, HTTPException, Depends, Request
+
 from services.knowledge_graph_service import LegalKnowledgeGraphBuilder
-from fastapi import APIRouter, File, UploadFile, HTTPException, Depends
 from services.storage_service import (
     upload_to_local,
     save_document_record,
     get_document_record,
     save_cached_analysis,
     get_cached_analysis,
-    create_session_id
-    upload_to_local, save_document_record, get_document_record,
-  save_cached_analysis, get_cached_analysis,
     create_session_id,
     delete_document_and_cache,
     UPLOAD_DIR
- main
 )
-import uuid
 from services.ocr_service import extract_document
 from services.rag_service import retrieve_relevant_laws
 from services.gemini_service import analyze_document_with_gemini, generate_chat_response
 from models.schemas import ChatRequest, ChatResponse
-import json
-import logging
 
 logger = logging.getLogger(__name__)
 
 api_router = APIRouter()
- feature/legal-knowledge-graph
 graph_builder = LegalKnowledgeGraphBuilder()
-@api_router.post("/upload")
-async def upload_document(file: UploadFile = File(...)):
-    """Upload document to S3 and return documentId"""
-    try:
-        contents = await file.read()
-        doc_id, local_path = upload_to_local(contents, file.filename)
-        # Assuming dummy user 'user_123' for MVP
-        save_document_record("user_123", doc_id, file.filename, local_path)
-
-graph_builder = LegalKnowledgeGraphBuilder()
-@api_router.get("/session")
-async def create_session():
-    return {"sessionId": create_session_id()}
-    
-@api_router.post("/upload")
-async def upload_document(file: UploadFile = File(...)):
-    """Upload document to S3 and return documentId"""
-    try:
-        contents = await file.read()
-        doc_id, local_path = upload_to_local(contents, file.filename)
-        # Assuming dummy user 'user_123' for MVP
-        save_document_record("user_123", doc_id, file.filename, local_path)
-
 
 # Upload validation constants
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB limit
@@ -133,82 +107,52 @@ async def upload_document(request: Request, file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @api_router.post("/analyze/{document_id}")
 async def analyze_document(request: Request, document_id: str, language: str = "en", force_ocr: bool = False, file: UploadFile = File(None)):
-async def analyze_document(
-    document_id: str,
-    language: str = "en",
-    file: UploadFile = File(None)
-):
-    """
-    Trigger full analysis pipeline.
-    """
-
+    """Trigger full analysis pipeline."""
     try:
         session_id = require_session_id(request)
         record = require_document_owner(document_id, session_id)
+        
         # ── Cache-first ──────────────────────────────────────────────────────────
         if not force_ocr:
             cached = get_cached_analysis(document_id, language)
             if cached:
                 logger.info(f"Cache HIT for document {document_id} [{language}]")
+                knowledge_graph = graph_builder.generate_graph(cached["extracted_text"])
+                
                 return {
                     "documentId": document_id,
                     "analysis": cached["analysis"],
+                    "knowledge_graph": knowledge_graph,
                     "extracted_text": cached["extracted_text"][:500] + "...",
                     "cached": True
                 }
+
         # ── Cache MISS: run the full pipeline ────────────────────────────────────
-        # Simplify MVP: if file is not provided, we download it from local storage via SQLite metadata.
-        # ── Cache-first ─────────────────────────────────────────────────────
-        cached = get_cached_analysis(document_id, language)
-
-        if cached:
-            logger.info(f"Cache HIT for document {document_id} [{language}]")
-
-            knowledge_graph = graph_builder.generate_graph(
-                cached["extracted_text"]
-            )
-
-            return {
-                "documentId": document_id,
-                "analysis": cached["analysis"],
-                "knowledge_graph": knowledge_graph,
-                "extracted_text": cached["extracted_text"][:500] + "...",
-                "cached": True
-            }
-
-        # ── Cache MISS: run full pipeline ──────────────────────────────────
-
         if not file:
             record = get_document_record(document_id)
-
             if not record or not record.get("local_path"):
                 raise HTTPException(
                     status_code=404,
                     detail="Document not found or file missing"
                 )
-
             try:
                 with open(record["local_path"], "rb") as f:
                     contents = f.read()
-
             except IOError:
                 raise HTTPException(
                     status_code=500,
                     detail="Failed to read document from storage"
                 )
-
             filename = record["filename"]
-
         else:
             contents = await file.read()
             filename = file.filename
 
         # 1. OCR Extraction
         text = extract_document(contents, filename, force_ocr=force_ocr)
-        
-        text = extract_document(contents, filename)
 
         # 2. RAG Retrieval
         relevant_laws = retrieve_relevant_laws(text, k=3)
@@ -241,19 +185,10 @@ async def analyze_document(
 
     except HTTPException as http_err:
         raise http_err
-
     except ValueError as val_err:
-        raise HTTPException(
-            status_code=400,
-            detail=str(val_err)
-        )
-
+        raise HTTPException(status_code=400, detail=str(val_err))
     except FileNotFoundError:
-        raise HTTPException(
-            status_code=404,
-            detail="Requested document file not found on storage."
-        )
-
+        raise HTTPException(status_code=404, detail="Requested document file not found on storage.")
     except Exception as e:
         import traceback
         from google.api_core.exceptions import (
@@ -265,46 +200,18 @@ async def analyze_document(
         trace = traceback.format_exc()
         logger.error(f"Analysis failed: {e}\n{trace}")
 
-        # Gemini quota
         if isinstance(e, ResourceExhausted):
-            raise HTTPException(
-                status_code=429,
-                detail="AI Quota limit reached. Please wait a minute and try again."
-            )
-
-        # Invalid request
+            raise HTTPException(status_code=429, detail="AI Quota limit reached. Please wait a minute and try again.")
         elif isinstance(e, InvalidArgument):
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid input structure. The document may be too long for the model."
-            )
-
-        # Gemini upstream issue
+            raise HTTPException(status_code=400, detail="Invalid input structure. The document may be too long for the model.")
         elif isinstance(e, GoogleAPIError):
-            raise HTTPException(
-                status_code=502,
-                detail="Upstream AI Service error. Please try again in a few moments."
-            )
-
-        # Missing env key
+            raise HTTPException(status_code=502, detail="Upstream AI Service error. Please try again in a few moments.")
+        
         if not os.getenv("GEMINI_API_KEY"):
-            raise HTTPException(
-                status_code=500,
-                detail="Server configuration issue: GEMINI_API_KEY environment variable is missing."
-            )
+            raise HTTPException(status_code=500, detail="Server configuration issue: GEMINI_API_KEY environment variable is missing.")
 
-        # Corrupt document
         if "fitz" in str(e.__class__) or "FileDataError" in type(e).__name__:
-            raise HTTPException(
-                status_code=400,
-                detail="The uploaded document is corrupted or could not be parsed."
-            )
-
- feature/legal-knowledge-graph
-        raise HTTPException(
-            status_code=500,
-            detail="An internal processing error occurred."
-        )
+            raise HTTPException(status_code=400, detail="The uploaded document is corrupted or could not be parsed.")
 
         raise HTTPException(status_code=500, detail="An internal processing error occurred.")
 
@@ -313,16 +220,11 @@ async def analyze_document(
 async def chat_general(request: ChatRequest):
     """General legal chat — no document context."""
     try:
-        # Validate user message is not empty
         if not request.user_message or not request.user_message.strip():
             raise HTTPException(status_code=400, detail="Message cannot be empty")
 
         analysis = request.document_analysis or {}
-
-        history = [
-            {"role": msg.role, "message": msg.message}
-            for msg in request.chat_history
-        ]
+        history = [{"role": msg.role, "message": msg.message} for msg in request.chat_history]
 
         text = generate_chat_response(
             analysis,
@@ -332,7 +234,6 @@ async def chat_general(request: ChatRequest):
         )
 
         return ChatResponse(response=text)
-
     except Exception as e:
         logger.error(f"General chat failed: {e}")
         raise HTTPException(status_code=500, detail="Chat generation failed")
@@ -351,10 +252,6 @@ async def chat_with_document(document_id: str, request: ChatRequest):
         return ChatResponse(response=response_text)
     except Exception as e:
         logger.error(f"Chat failed for document {document_id}: {e}")
- feature/legal-knowledge-graph
-        raise HTTPException(status_code=500, detail="Chat generation failed")
-
-        raise HTTPException(status_code=500, detail="Chat generation failed")
         raise HTTPException(status_code=500, detail="Chat generation failed")
 
         
@@ -368,4 +265,3 @@ async def delete_document(document_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Document not found")
 
     return {"documentId": document_id, "deleted": True}
-
