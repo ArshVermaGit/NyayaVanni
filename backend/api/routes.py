@@ -24,6 +24,10 @@ from services.storage_service import (
 )
 from services.ocr_service import extract_document
 from services.rag_service import retrieve_relevant_laws
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
+limiter = Limiter(key_func=get_remote_address)
 from services.gemini_service import analyze_document_with_gemini, generate_chat_response, stream_chat_response
 from models.schemas import ChatRequest, ChatResponse
 
@@ -63,6 +67,7 @@ async def create_session():
     return {"sessionId": create_session_id()}
 
 @api_router.post("/upload")
+@limiter.limit("10/minute")
 async def upload_document(request: Request, file: UploadFile = File(...)):
     """Upload document and return documentId"""
     try:
@@ -117,6 +122,7 @@ async def upload_document(request: Request, file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @api_router.post("/analyze/{document_id}")
+@limiter.limit("10/minute")
 def analyze_document(request: Request, document_id: str, language: str = "en", force_ocr: bool = False, file: UploadFile = File(None)):
     """Trigger full analysis pipeline."""
     try:
