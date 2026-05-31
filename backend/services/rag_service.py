@@ -45,7 +45,8 @@ corpus_embeddings = None
 
 def get_embeddings(texts: list) -> np.ndarray:
     try:
-        if not texts: return np.array([])
+        if not texts or not os.getenv("GEMINI_API_KEY"):
+            return np.array([])
         result = genai.embed_content(
             model="models/gemini-embedding-001",
             content=texts,
