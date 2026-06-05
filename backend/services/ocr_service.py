@@ -7,6 +7,7 @@ import docx
 import re
 import logging
 import docx
+import zipfile
 
 logger = logging.getLogger(__name__)
 
